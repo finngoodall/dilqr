@@ -1,9 +1,7 @@
-open Owl
-module AD = Algodiff.D
+module AD = Owl.Algodiff.D
 
 type t = float * float
 
 val increase : t -> t
 val decrease : t -> t
-
-val regularize : AD.t -> AD.t
+val regularize : ?thresh:float -> AD.t -> AD.t

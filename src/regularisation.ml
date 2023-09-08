@@ -1,4 +1,5 @@
 open Owl
+
 module AD = Algodiff.D
 
 type t = float * float
@@ -17,10 +18,19 @@ let decrease (delta, mu) =
   in
   delta, mu
 
-let regularize mat =
+let min_eig mat =
+  mat
+  |> AD.unpack_arr
+  |> Linalg.D.eigvals
+  |> Dense.Matrix.Z.re
+  |> Mat.min'
+
+let regularize ?(thresh = 1e-3) mat =
   let n = AD.Mat.row_num mat in
-  let _, svs, _ = Linalg.D.svd (AD.unpack_arr mat) in
-  let w_min = Mat.min' svs in
-  if w_min < 1e-8
-  then AD.Maths.(mat - AD.F w_min * AD.Mat.eye n)
-  else mat
+  let w = min_eig mat in
+  let out =
+    if w < thresh
+    then AD.Maths.(mat + ((F thresh + abs (F w)) * (AD.Mat.eye n)))
+    else mat
+  in
+  out

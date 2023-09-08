@@ -16,8 +16,17 @@ type t =
   ; f : AD.t
   }
 
+let is_pos_def ?(thresh = 0.) mat =
+  let w =
+    mat
+    |> AD.unpack_arr
+    |> Linalg.D.eigvals
+    |> Dense.Matrix.Z.re
+    |> Mat.min'
+  in
+  w > thresh
+
 let backward flxx flx tape =
-  (* let n = AD.(shape flx).(1) in  *)
   let kf = List.length tape in
   let k, vxx0, _, df1, df2, acc =
     let rec backward (delta, mu) (k, vxx, vx, df1, df2, acc) = function
@@ -27,11 +36,16 @@ let backward flxx flx tape =
         :: tl ->
         let at = AD.Maths.transpose a in
         let bt = AD.Maths.transpose b in
+        (* let n = AD.Mat.row_num a in *)
         let m = AD.Mat.row_num b in
         let qx = AD.Maths.(rlx + (vx *@ at)) in
         let qu = AD.Maths.(rlu + (vx *@ bt)) in
-        let qxx = AD.Maths.(rlxx + (a *@ vxx *@ at)) in
-        let quu = AD.Maths.(rluu + (b *@ vxx *@ bt)) in
+        (* If rlux != 0 then the matrix [rlxx, rlux^T; rlux, rluu] must be regularized,
+          instead of regularizng rlxx and rluu separately as done here *)
+        let rlxx_reg = Regularisation.regularize rlxx in
+        let rluu_reg = Regularisation.regularize rluu in
+        let qxx = AD.Maths.(rlxx_reg + (a *@ vxx *@ at)) in
+        let quu = AD.Maths.(rluu_reg + (b *@ vxx *@ bt)) in
         let quu = AD.Maths.(F 0.5 * (quu + transpose quu)) in
         let qux = AD.Maths.(rlux + (b *@ vxx *@ at)) in
         let _K =
@@ -51,16 +65,20 @@ let backward flxx flx tape =
         let acc = (s, (_K, _k, vxx, quu_inv)) :: acc in
         let df1 = AD.Maths.(df1 + sum' (_k *@ quu *@ transpose _k)) in
         let df2 = AD.Maths.(df2 + sum' (_k *@ transpose quu)) in
+        if not (is_pos_def rlxx_reg) then Stdio.printf "rlxx_reg not pos def";
+        if not (is_pos_def rlxx_reg) then Stdio.printf "rluu_reg not pos def";
+        if not (is_pos_def qxx) then Stdio.printf "qxx not pos def";
+        if not (is_pos_def quu) then Stdio.printf "quu not pos def";
+        if not (is_pos_def vxx) then Stdio.printf "vxx not pos def";
         backward (delta, mu) (k - 1, vxx, vx, df1, df2, acc) tl
       | [] -> k, vxx, vx, df1, df2, acc
     in
-    backward (1., 0.) (kf - 1, Regularisation.regularize flxx, flx, AD.F 0., AD.F 0., []) tape
+    backward (1., 0.) (kf - 1, flxx, flx, AD.F 0., AD.F 0., []) tape
   in
   assert (k = -1);
   acc, (AD.unpack_flt df1, AD.unpack_flt df2, vxx0)
 
 
-(* If rl_ux != 0, then these calculations for the foward pass covariance terms are incorrect! *)
 let forward acc x0 p0 =
   let _, xf, _, tape =
     (*add computation of P : 

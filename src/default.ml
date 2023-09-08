@@ -1,4 +1,5 @@
 open Owl
+module Exn = Exception
 module AD = Algodiff.D
 open AD.Builder
 
@@ -38,10 +39,8 @@ let forward_for_backward
           and b = dyn_u ~k ~x ~u
           and rlx = rl_x ~k ~x ~u
           and rlu = rl_u ~k ~x ~u in
-          (* If rlux != 0 then the matrix [rlxx, rlux^T; rlux, rluu] must be regularized,
-             instead of regularizng rlxx and rluu separately as done here *)
-          let rlxx = Regularisation.regularize (rl_xx ~k ~x ~u) in
-          let rluu = Regularisation.regularize (rl_uu ~k ~x ~u)
+          let rlxx = rl_xx ~k ~x ~u in
+          let rluu = rl_uu ~k ~x ~u
           and rlux = rl_ux ~k ~x ~u in
           let f = AD.Maths.(dyn ~k ~x ~u - (x *@ a) - (u *@ b)) in
           let s =
@@ -227,59 +226,63 @@ let update_cov ~theta =
     (* xf, xs, us are in reverse *)
     let vxxf, vxf, tape, _, _p0 = ffb x0 us in
     let acc, (_, _, _vxx0) = Lqr.backward vxxf vxf tape in
-      let _, sigma_xs, sigma_us =
-        List.fold_left
-          (fun (p_prev, sigma_xs, sigma_us)
-                ((s : Lqr.t), (_K, _k, vxx, qtuu_inv)) ->
-            let n = AD.Mat.row_num s.a in
-            let p_prev = AD.Maths.(F 0.5 * (p_prev + transpose p_prev)) in
-            let vxx = AD.Maths.(F 0.5 * (vxx + transpose vxx)) in
-            let q_xx = AD.Maths.(p_prev + vxx) in
-            let q_txx = q_xx in
-            let p_prev, sigma_xx =
-              try
-                ( p_prev
-                , AD.Linalg.linsolve
-                    AD.Maths.((F 1E-4 * AD.Mat.eye n) + q_txx)
-                    (AD.Mat.eye (AD.Mat.row_num s.a)) )
-              with
-              | _ ->
-                let _ =
-                  Stdio.printf "failed in dilqr cov : replace with vxx"
-                in
-                ( AD.Maths.(F 1E-3 * AD.Mat.eye n)
-                , AD.Linalg.linsolve
-                    AD.Maths.(vxx + (F 1E-4 * AD.Mat.eye (AD.Mat.row_num s.a)))
-                    (AD.Mat.eye (AD.Mat.row_num s.a)) )
-            in
-            let sigma_uu = AD.Maths.((transpose _K *@ sigma_xx *@ _K) + qtuu_inv) in
-            let sigma_uu = AD.Maths.(F 0.5 * (sigma_uu + transpose sigma_uu)) in
-            let inv_a =
-              AD.Linalg.linsolve AD.Maths.(s.a + (F 1E-4 * AD.Mat.eye n)) (AD.Mat.eye n)
-            in
-            let p1 = AD.Maths.(inv_a *@ (p_prev + s.rlxx) *@ transpose inv_a) in
-            let p1 = AD.Maths.(F 0.5 * (transpose p1 + p1)) in
-            let p2_inv = AD.Maths.(s.rluu + (s.b *@ p1 *@ transpose s.b)) in
-            let p2_inv = AD.Maths.(F 0.5 * (p2_inv + transpose p2_inv)) in
-            let p2 =
-              try
+    let _, sigma_xs, sigma_us =
+      List.fold_left
+        (fun (p_prev, sigma_xs, sigma_us)
+              ((s : Lqr.t), (_K, _k, vxx, qtuu_inv)) ->
+          let n = AD.Mat.row_num s.a in
+          let m = AD.Mat.row_num s.b in
+          let p_prev = AD.Maths.(F 0.5 * (p_prev + transpose p_prev)) in
+          let vxx = AD.Maths.(F 0.5 * (vxx + transpose vxx)) in
+          let sigma_xx =
+            try
+              let temp =
+                (* AD.(Linalg.inv Maths.(p_prev + vxx)) *)
                 AD.Linalg.linsolve
-                  AD.Maths.(p2_inv + (F 1E-4 * AD.Mat.eye (AD.Mat.row_num s.b)))
-                  (AD.Mat.eye (AD.Mat.row_num s.b))
-              with
-              | _ ->
+                  AD.Maths.((F 1E-4 * AD.Mat.eye n) + p_prev + vxx)
+                  (AD.Mat.eye n)
+              in
+              AD.Maths.(F 0.5 * (temp + transpose temp))
+            with
+            | e ->
+              let _ =
+                Stdio.printf " default.ml line 247: %S %! " (Exn.to_string e)
+              in
+              AD.Mat.eye n
+          in
+          let sigma_uu = AD.Maths.((transpose _K *@ sigma_xx *@ _K) + qtuu_inv) in
+          let sigma_uu = AD.Maths.(F 0.5 * (sigma_uu + transpose sigma_uu)) in
+          let inv_a =
+            AD.Linalg.linsolve AD.Maths.(s.a + (F 1E-4 * AD.Mat.eye n)) (AD.Mat.eye n)
+          in
+          let p1 = AD.Maths.(inv_a *@ (p_prev + s.rlxx) *@ transpose inv_a) in
+          let p1 = AD.Maths.(F 0.5 * (transpose p1 + p1)) in
+          let p2_inv = AD.Maths.(s.rluu + (s.b *@ p1 *@ transpose s.b)) in
+          let p2_inv = AD.Maths.(F 0.5 * (p2_inv + transpose p2_inv)) in
+          let p2 =
+            try
+              (* AD.Linalg.inv p2_inv *)
+              let temp =
                 AD.Linalg.linsolve
-                  AD.Maths.((F 1E-4 * AD.Mat.eye (AD.Mat.row_num s.b)) + s.rluu)
-                  (AD.Mat.eye (AD.Mat.row_num s.b))
-            in
-            let new_p = AD.Maths.(p1 - (p1 *@ transpose s.b *@ p2 *@ s.b *@ p1)) in
-            let sigma_xs = sigma_xx :: sigma_xs in
-            let sigma_us = sigma_uu :: sigma_us in
-            new_p, sigma_xs, sigma_us)
-          ( _p0, [], [])
-          acc
-      in
-      List.rev sigma_xs, List.rev sigma_us
+                  AD.Maths.(p2_inv + (F 1E-4 * AD.Mat.eye m))
+                  (AD.Mat.eye m)
+              in
+              AD.Maths.(F 0.5 * (temp + transpose temp))
+            with
+            | e ->
+              let _ =
+                Stdio.printf " default.ml line 268: %s %! " (Exn.to_string e)
+              in
+              AD.Mat.eye m
+          in
+          let new_p = AD.Maths.(p1 - (p1 *@ transpose s.b *@ p2 *@ s.b *@ p1)) in
+          let sigma_xs = sigma_xx :: sigma_xs in
+          let sigma_us = sigma_uu :: sigma_us in
+          new_p, sigma_xs, sigma_us)
+        ( AD.Mat.zeros (AD.Mat.row_num _p0) (AD.Mat.row_num _p0), [], [])
+        acc
+    in
+    List.rev sigma_xs, List.rev sigma_us
 
   let trajectory ~theta =
     let forward = forward ~theta in
